@@ -3,7 +3,6 @@ version: '3.8'
 services:
   postgres16:
     image: postgres:16
-    container_name: mastodon_postgres16
     restart: always
     environment:
       POSTGRES_DB: mastodon_production
@@ -40,6 +39,27 @@ services:
       retries: 3
       start_period: 60s
     # ネットワーク設定
+    networks:
+      - mastodon_network
+
+  # Mackerel monitoring agent
+  mackerel-agent:
+    image: mackerel/mackerel-agent:latest
+    hostname: ${HOSTNAME:-pg16-container}
+    environment:
+      - apikey=${MACKEREL_API_KEY}
+      - enable_docker_plugin=1
+      - auto_retirement=0
+      - opts=-v
+      - roles=ikatodon:db
+      - include=/etc/mackerel-agent/conf.d/*.conf
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/mackerel-agent/:/var/lib/mackerel-agent/
+      - ./mackerel/postgres.conf:/etc/mackerel-agent/conf.d/postgres.conf:ro
+    depends_on:
+      - postgres16
+    restart: unless-stopped
     networks:
       - mastodon_network
 
