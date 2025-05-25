@@ -184,44 +184,6 @@ EOF
 chmod +x /home/mastodon/setup-private-network.sh
 chown mastodon:mastodon /home/mastodon/setup-private-network.sh
 
-# 便利なエイリアスの設定
-echo "Setting up useful aliases..."
-cat >> /home/mastodon/.bashrc << 'EOF'
-
-# Custom aliases for PostgreSQL management
-alias ll='ls -alF'
-alias la='ls -A'
-alias l='ls -CF'
-alias ..='cd ..'
-alias ...='cd ../..'
-
-# Docker aliases
-alias dps='docker ps'
-alias dlog='docker logs'
-alias dexec='docker exec -it'
-
-# PostgreSQL aliases
-alias pglog='docker logs mastodon_postgres16'
-alias pgexec='docker exec -it mastodon_postgres16 psql -U mastodon -d mastodon_production'
-alias pgstatus='docker exec mastodon_postgres16 pg_isready -U mastodon -d mastodon_production'
-
-# System monitoring
-alias ports='netstat -tlnp'
-alias meminfo='free -h'
-alias diskinfo='df -h'
-
-echo "Welcome to ikatodon PostgreSQL 16 DB Server!"
-echo "Useful commands:"
-echo "  pglog     - View PostgreSQL logs"
-echo "  pgexec    - Connect to PostgreSQL"
-echo "  pgstatus  - Check PostgreSQL status"
-echo "  dps       - List Docker containers"
-echo ""
-EOF
-
-# rootユーザーにも同様のエイリアスを設定
-cp /home/mastodon/.bashrc /root/.bashrc
-
 # システム情報の表示
 echo "Creating system info script..."
 cat > /home/mastodon/system-info.sh << 'EOF'
@@ -258,20 +220,6 @@ chown mastodon:mastodon /home/mastodon/system-info.sh
 # 初回ログイン時にシステム情報を表示
 echo "/home/mastodon/system-info.sh" >> /home/mastodon/.bashrc
 
-# ログローテーションの設定
-echo "Configuring log rotation..."
-cat > /etc/logrotate.d/conoha-startup << 'EOF'
-/var/log/conoha-startup.log {
-    weekly
-    rotate 4
-    compress
-    delaycompress
-    missingok
-    notifempty
-    create 644 root root
-}
-EOF
-
 # 最終的なシステム情報の表示
 echo ""
 echo "=== Setup Summary ==="
@@ -287,7 +235,7 @@ echo ""
 echo "Next steps:"
 echo "1. Configure private network: sudo /home/mastodon/setup-private-network.sh <private_ip>"
 echo "2. SSH to server: ssh mastodon@<server_ip>"
-echo "3. Run Ansible playbooks from ikatodon-db directory"
+echo "3. Run Ansible playbooks from mastodon directory"
 echo ""
 echo "=== ConoHa Startup Script Completed at $(date) ==="
 

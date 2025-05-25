@@ -1,0 +1,9 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+このリポジトリは https://github.com/koba-lab/mastodon で接続されるPostgresqlサーバーをIaC管理するためのリポジトリです。
+
+PostgresqlサーバーはConoHaのVPSを使用して運用します。
+
