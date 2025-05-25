@@ -1,10 +1,17 @@
 #!/bin/bash
+# cloud-init compatible startup script
 # ConoHa スタートアップスクリプト
 # PostgreSQL 16 DB サーバー用初期設定
 
 set -e
 
+# ログファイルの設定
+LOGFILE="/var/log/conoha-startup.log"
+exec > >(tee -a $LOGFILE)
+exec 2>&1
+
 echo "=== ConoHa Startup Script Started at $(date) ==="
+echo "Log file: $LOGFILE"
 
 # システムの更新
 echo "Updating system packages..."
@@ -16,7 +23,9 @@ echo "Installing required packages..."
 apt-get install -y \
     curl \
     wget \
-    git
+    git \
+    fail2ban \
+    unattended-upgrades
 
 # Ansibleのインストール
 echo "Installing Ansible..."
@@ -31,6 +40,12 @@ if ! id "mastodon" &>/dev/null; then
 else
     echo "mastodon user already exists"
 fi
+
+# mastodonユーザーのSSHディレクトリ作成
+SSH_DIR="/home/mastodon/.ssh"
+mkdir -p $SSH_DIR
+chmod 700 $SSH_DIR
+chown mastodon:mastodon $SSH_DIR
 
 # authorized_keysファイルの作成（rootのキーをコピー）
 if [ -f /root/.ssh/authorized_keys ]; then
