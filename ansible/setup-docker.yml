@@ -1,0 +1,246 @@
+---
+- name: Setup Docker and Docker Compose on Ubuntu 24 with ConoHa Private Network
+  hosts: all
+  become: yes
+  vars:
+    docker_users:
+      - "{{ ansible_user }}"
+      - mastodon  # Mastodonユーザーも追加
+    # ConoHaプライベートネットワーク設定
+    private_network:
+      interface: "{{ private_interface | default('ens4') }}"  # ConoHaの一般的なプライベートIF
+      ip: "{{ private_ip }}"  # インベントリで指定
+      netmask: "{{ private_netmask | default('255.255.255.0') }}"
+      gateway: "{{ private_gateway | default(None) }}"
+
+  tasks:
+    - name: Update apt package cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install required packages
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+          - software-properties-common
+          - netplan.io
+        state: present
+
+    - name: Check if private network interface exists
+      shell: ip link show {{ private_network.interface }}
+      register: private_interface_check
+      failed_when: false
+      changed_when: false
+      when: private_network.ip is defined
+
+    - name: Configure ConoHa private network via netplan
+      copy:
+        content: |
+          network:
+            version: 2
+            renderer: networkd
+            ethernets:
+              {{ private_network.interface }}:
+                addresses:
+                  - {{ private_network.ip }}/{{ private_network.netmask | ipaddr('prefix') }}
+                {% if private_network.gateway %}
+                gateway4: {{ private_network.gateway }}
+                {% endif %}
+                nameservers:
+                  addresses:
+                    - 8.8.8.8
+                    - 8.8.4.4
+        dest: /etc/netplan/11-localnetwork.yaml
+        owner: root
+        group: root
+        mode: '0644'
+      when:
+        - private_network.ip is defined
+        - private_interface_check.rc == 0
+      notify: apply netplan
+
+    - name: Add Docker GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker repository
+      apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+
+    - name: Update apt package cache after adding Docker repo
+      apt:
+        update_cache: yes
+
+    - name: Install Docker CE
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+
+    - name: Start and enable Docker service
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Add users to docker group
+      user:
+        name: "{{ item }}"
+        groups: docker
+        append: yes
+      loop: "{{ docker_users }}"
+      ignore_errors: yes
+
+    - name: Create mastodon user if not exists
+      user:
+        name: mastodon
+        shell: /bin/bash
+        create_home: yes
+        groups: docker
+        append: yes
+      ignore_errors: yes
+
+    - name: Create PostgreSQL data directory
+      file:
+        path: /var/lib/postgresql/16/data
+        state: directory
+        owner: 999
+        group: 999
+        mode: '0755'
+
+    - name: Create PostgreSQL log directory
+      file:
+        path: /var/lib/postgresql/16/log
+        state: directory
+        owner: 999
+        group: 999
+        mode: '0755'
+
+    - name: Create mastodon working directory
+      file:
+        path: /opt/mastodon
+        state: directory
+        owner: mastodon
+        group: mastodon
+        mode: '0755'
+
+    - name: Install Docker Compose (standalone) for compatibility
+      get_url:
+        url: "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64"
+        dest: /usr/local/bin/docker-compose
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Create symbolic link for docker-compose
+      file:
+        src: /usr/local/bin/docker-compose
+        dest: /usr/bin/docker-compose
+        state: link
+
+    - name: Configure Docker daemon for production
+      copy:
+        content: |
+          {
+            "log-driver": "json-file",
+            "log-opts": {
+              "max-size": "10m",
+              "max-file": "3"
+            },
+            "storage-driver": "overlay2",
+            "live-restore": true,
+            "default-address-pools": [
+              {
+                "base": "172.17.0.0/12",
+                "size": 24
+              }
+            ]
+          }
+        dest: /etc/docker/daemon.json
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart docker
+
+    - name: Configure firewall for PostgreSQL (if ufw is enabled)
+      ufw:
+        rule: allow
+        port: '5432'
+        src: "{{ item }}"
+      loop:
+        - "{{ private_network.ip | ipaddr('network/prefix') }}"  # プライベートネットワーク全体
+        - "127.0.0.1"  # ローカルホスト
+      when:
+        - private_network.ip is defined
+        - ansible_facts['services']['ufw.service'] is defined
+      ignore_errors: yes
+
+    - name: Install useful tools for PostgreSQL management
+      apt:
+        name:
+          - postgresql-client
+          - htop
+          - iotop
+          - net-tools
+          - iputils-ping
+        state: present
+
+    - name: Verify Docker installation
+      command: docker --version
+      register: docker_version
+      changed_when: false
+
+    - name: Verify Docker Compose installation
+      command: docker-compose --version
+      register: docker_compose_version
+      changed_when: false
+
+    - name: Display Docker version
+      debug:
+        msg: "{{ docker_version.stdout }}"
+
+    - name: Display Docker Compose version
+      debug:
+        msg: "{{ docker_compose_version.stdout }}"
+
+    - name: Display network configuration
+      debug:
+        msg: |
+          Private Network Configuration:
+          Interface: {{ private_network.interface }}
+          IP: {{ private_network.ip | default('Not configured') }}
+          Netmask: {{ private_network.netmask | default('Not configured') }}
+      when: private_network.ip is defined
+
+    - name: Test Docker with hello-world
+      docker_container:
+        name: hello-world-test
+        image: hello-world
+        state: started
+        auto_remove: yes
+      register: hello_world_result
+
+    - name: Display hello-world test result
+      debug:
+        msg: "Docker test completed successfully"
+      when: hello_world_result is succeeded
+
+  handlers:
+    - name: apply netplan
+      command: netplan apply
+
+    - name: restart docker
+      systemd:
+        name: docker
+        state: restarted

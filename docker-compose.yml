@@ -1,0 +1,51 @@
+version: '3.8'
+
+services:
+  postgres16:
+    image: postgres:16
+    container_name: mastodon_postgres16
+    restart: always
+    environment:
+      POSTGRES_DB: mastodon_production
+      POSTGRES_USER: mastodon
+      POSTGRES_PASSWORD: ${DB_PASS}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --locale=C"
+    volumes:
+      # ホストのディスクを直接マウント（パフォーマンス重視）
+      - /var/lib/postgresql/16/data:/var/lib/postgresql/data
+      # 設定ファイルのマウント
+      - ./postgresql.conf:/etc/postgresql/postgresql.conf
+      - ./pg_hba.conf:/etc/postgresql/pg_hba.conf
+    ports:
+      # プライベートネットワークのIPでバインド
+      - "${PRIVATE_IP:-0.0.0.0}:5432:5432"
+    # パフォーマンス最適化設定
+    shm_size: 1gb
+    command: >
+      postgres
+      -c config_file=/etc/postgresql/postgresql.conf
+      -c shared_preload_libraries=pg_stat_statements
+    # リソース制限（必要に応じて調整）
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 2G
+    # ヘルスチェック
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mastodon -d mastodon_production"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    # ネットワーク設定
+    networks:
+      - mastodon_network
+
+networks:
+  mastodon_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

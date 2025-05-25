@@ -1,0 +1,216 @@
+---
+- name: Deploy PostgreSQL 16 (Simplified for ConoHa Startup Script)
+  hosts: all
+  become: yes
+  vars:
+    mastodon_dir: /opt/mastodon
+    db_password: "{{ vault_db_password | default('change_this_password') }}"
+
+  tasks:
+    - name: Configure ConoHa private network
+      command: /home/mastodon/setup-private-network.sh {{ private_ip }} {{ private_interface | default('ens4') }}
+      become_user: mastodon
+      when: private_ip is defined
+
+    - name: Copy Docker Compose file for PostgreSQL 16
+      copy:
+        src: docker-compose.postgres16.yml
+        dest: "{{ mastodon_dir }}/docker-compose.postgres16.yml"
+        owner: mastodon
+        group: mastodon
+        mode: '0644'
+
+    - name: Copy PostgreSQL configuration
+      copy:
+        src: postgresql.conf
+        dest: "{{ mastodon_dir }}/postgresql.conf"
+        owner: mastodon
+        group: mastodon
+        mode: '0644'
+
+    - name: Create pg_hba.conf for private network
+      copy:
+        content: |
+          # PostgreSQL Client Authentication Configuration File
+          # TYPE  DATABASE        USER            ADDRESS                 METHOD
+
+          # "local" is for Unix domain socket connections only
+          local   all             all                                     trust
+
+          # IPv4 local connections:
+          host    all             all             127.0.0.1/32            scram-sha-256
+          host    all             all             172.16.0.0/12           scram-sha-256
+          host    all             all             172.20.0.0/16           scram-sha-256
+
+          # ConoHa private network
+          host    all             all             {{ private_ip | ipaddr('network/prefix') }}    scram-sha-256
+
+          # IPv6 local connections:
+          host    all             all             ::1/128                 scram-sha-256
+
+          # Allow replication connections from localhost, by a user with the
+          # replication privilege.
+          local   replication     all                                     trust
+          host    replication     all             127.0.0.1/32            scram-sha-256
+          host    replication     all             ::1/128                 scram-sha-256
+        dest: "{{ mastodon_dir }}/pg_hba.conf"
+        owner: mastodon
+        group: mastodon
+        mode: '0644'
+
+    - name: Create .env file for Docker Compose
+      copy:
+        content: |
+          DB_PASS={{ db_password }}
+          PRIVATE_IP={{ private_ip | default('0.0.0.0') }}
+        dest: "{{ mastodon_dir }}/.env"
+        owner: mastodon
+        group: mastodon
+        mode: '0600'
+
+    - name: Pull PostgreSQL 16 image
+      docker_image:
+        name: postgres:16
+        source: pull
+
+    - name: Start PostgreSQL 16 with Docker Compose
+      docker_compose:
+        project_src: "{{ mastodon_dir }}"
+        files:
+          - docker-compose.postgres16.yml
+        state: present
+      become_user: mastodon
+
+    - name: Wait for PostgreSQL to be ready
+      wait_for:
+        port: 5432
+        host: "{{ private_ip | default('localhost') }}"
+        delay: 10
+        timeout: 60
+
+    - name: Verify PostgreSQL connection
+      command: docker exec mastodon_postgres16 pg_isready -U mastodon -d mastodon_production
+      register: pg_ready
+      changed_when: false
+
+    - name: Display PostgreSQL status
+      debug:
+        msg: "PostgreSQL 16 is ready: {{ pg_ready.stdout }}"
+
+    - name: Create backup script
+      copy:
+        content: |
+          #!/bin/bash
+          # PostgreSQL backup script
+          BACKUP_DIR="/opt/mastodon/backups"
+          DATE=$(date +%Y%m%d_%H%M%S)
+
+          mkdir -p $BACKUP_DIR
+
+          # Create backup
+          docker exec mastodon_postgres16 pg_dump -U mastodon -Fc mastodon_production > $BACKUP_DIR/mastodon_backup_$DATE.dump
+
+          # Keep only last 7 days of backups
+          find $BACKUP_DIR -name "mastodon_backup_*.dump" -mtime +7 -delete
+
+          echo "Backup completed: mastodon_backup_$DATE.dump"
+        dest: /opt/mastodon/backup.sh
+        owner: mastodon
+        group: mastodon
+        mode: '0755'
+
+    - name: Create restore script
+      copy:
+        content: |
+          #!/bin/bash
+          # PostgreSQL restore script
+          if [ -z "$1" ]; then
+            echo "Usage: $0 <backup_file>"
+            echo "Available backups:"
+            ls -la /opt/mastodon/backups/
+            exit 1
+          fi
+
+          BACKUP_FILE="$1"
+
+          if [ ! -f "$BACKUP_FILE" ]; then
+            echo "Backup file not found: $BACKUP_FILE"
+            exit 1
+          fi
+
+          echo "Restoring from: $BACKUP_FILE"
+          echo "This will overwrite the current database. Continue? (y/N)"
+          read -r response
+
+          if [[ "$response" =~ ^[Yy]$ ]]; then
+            # Drop and recreate database
+            docker exec mastodon_postgres16 dropdb -U mastodon mastodon_production
+            docker exec mastodon_postgres16 createdb -U mastodon mastodon_production
+
+            # Restore from backup
+            docker exec -i mastodon_postgres16 pg_restore -U mastodon -d mastodon_production < "$BACKUP_FILE"
+
+            echo "Restore completed"
+          else
+            echo "Restore cancelled"
+          fi
+        dest: /opt/mastodon/restore.sh
+        owner: mastodon
+        group: mastodon
+        mode: '0755'
+
+    - name: Create network monitoring script
+      copy:
+        content: |
+          #!/bin/bash
+          # Network and PostgreSQL monitoring script
+          echo "=== Network Configuration ==="
+          ip addr show {{ private_interface | default('ens4') }}
+          echo ""
+
+          echo "=== PostgreSQL Connection Test ==="
+          docker exec mastodon_postgres16 pg_isready -U mastodon -d mastodon_production
+          echo ""
+
+          echo "=== PostgreSQL Connections ==="
+          docker exec mastodon_postgres16 psql -U mastodon -d mastodon_production -c "SELECT client_addr, count(*) FROM pg_stat_activity WHERE state = 'active' GROUP BY client_addr;"
+          echo ""
+
+          echo "=== Docker Network ==="
+          docker network ls
+          docker network inspect mastodon_network
+        dest: /opt/mastodon/monitor.sh
+        owner: mastodon
+        group: mastodon
+        mode: '0755'
+
+    - name: Setup daily backup cron job
+      cron:
+        name: "PostgreSQL daily backup"
+        minute: "0"
+        hour: "2"
+        job: "/opt/mastodon/backup.sh"
+        user: mastodon
+
+    - name: Display connection information
+      debug:
+        msg: |
+          PostgreSQL 16 Setup Complete!
+
+          Connection Information:
+          - Host: {{ private_ip | default('localhost') }}
+          - Port: 5432
+          - Database: mastodon_production
+          - User: mastodon
+
+          Management Scripts:
+          - Backup: /opt/mastodon/backup.sh
+          - Restore: /opt/mastodon/restore.sh
+          - Monitor: /opt/mastodon/monitor.sh
+
+          For Mastodon .env.production:
+          DB_HOST={{ private_ip | default('localhost') }}
+          DB_PORT=5432
+          DB_NAME=mastodon_production
+          DB_USER=mastodon
+          DB_PASS={{ db_password }}
